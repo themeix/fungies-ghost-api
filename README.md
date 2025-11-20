@@ -33,3 +33,15 @@ Behavior
 Notes
 - Uses Ghost Admin API JWT with HS256 and `kid` header.
 - Verifies request signature with HMAC SHA256 over raw body.
+
+Local Development
+- Copy `.env.example` to `.env.local` and fill values.
+- Run `npm install`.
+- Start local server: `npm run dev`.
+- Health check: `GET http://localhost:3000/api/fungies-webhook` returns env info booleans.
+- Send test POST with valid signature and minimal payload containing `email` and `type`.
+
+Vercel Environments
+- Vercel sets `VERCEL_ENV` to `development`, `preview`, or `production`.
+- Configure env vars in Vercel for each environment.
+- The function will read values from `process.env` without exposing secrets.

@@ -1,4 +1,6 @@
 Context.md
+.env*
+!.env.example
 /node_modules
 # Ignore files
 .DS_Store

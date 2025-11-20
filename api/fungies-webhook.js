@@ -94,6 +94,14 @@ function extractEmail(payload) {
 }
 
 export default async function handler(req, res) {
+  if (req.method === "GET") {
+    const envName = process.env.VERCEL_ENV || process.env.NODE_ENV || "development";
+    const hasGhostUrl = Boolean(process.env.GHOST_SITE_URL || process.env.GHOST_ADMIN_API_URL);
+    const hasGhostKey = Boolean(process.env.GHOST_ADMIN_API_KEY);
+    const hasFungiesSecret = Boolean(process.env.FUNGIES_WEBHOOK_SECRET);
+    res.status(200).json({ ok: true, env: envName, ghostUrl: hasGhostUrl, ghostKey: hasGhostKey, fungiesSecret: hasFungiesSecret });
+    return;
+  }
   if (req.method !== "POST") {
     res.status(405).json({ error: "method_not_allowed" });
     return;
