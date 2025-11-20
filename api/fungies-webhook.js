@@ -35,6 +35,44 @@ function verifySignature(raw, secret, signature) {
   return false;
 }
 
+function getSignatureHeader(req) {
+  const h = req.headers || {};
+  return (
+    h["x-fungies-signature"] || h["x-fungies-signature-sha256"] || h["x-signature"] || h["x-webhook-signature"] || h["x-hub-signature"]
+  );
+}
+
+function stableStringify(obj) {
+  const sortObj = (o) => {
+    if (Array.isArray(o)) return o.map(sortObj);
+    if (o && typeof o === "object") {
+      const keys = Object.keys(o).sort();
+      const out = {};
+      for (const k of keys) out[k] = sortObj(o[k]);
+      return out;
+    }
+    return o;
+  };
+  return JSON.stringify(sortObj(obj));
+}
+
+function verifyWithFallbacks(raw, secret, payload, signature) {
+  if (verifySignature(raw, secret, signature)) return true;
+  let candidates = [];
+  try { candidates.push(Buffer.from(stableStringify(payload))); } catch {}
+  try { candidates.push(Buffer.from(JSON.stringify(payload))); } catch {}
+  const id = payload?.id;
+  const key = payload?.idempotencyKey;
+  const type = payload?.type;
+  for (const s of [id, key, type, key && id && `${id}.${key}`, key && type && `${type}.${key}`].filter(Boolean)) {
+    candidates.push(Buffer.from(String(s)));
+  }
+  for (const c of candidates) {
+    if (verifySignature(c, secret, signature)) return true;
+  }
+  return false;
+}
+
 function base64urlEncode(obj) {
   const json = typeof obj === "string" ? obj : JSON.stringify(obj);
   return Buffer.from(json).toString("base64").replace(/=+/g, "").replace(/\+/g, "-").replace(/\//g, "_");
@@ -137,17 +175,29 @@ export default async function handler(req, res) {
     return;
   }
   const raw = await getRawBody(req);
-  const signature = req.headers["x-fungies-signature"]; 
-  const ok = verifySignature(raw, process.env.FUNGIES_WEBHOOK_SECRET, signature);
-  if (!ok) {
-    res.status(401).json({ error: "invalid_signature" });
-    return;
-  }
+  const signature = getSignatureHeader(req);
+  const secret = process.env.FUNGIES_WEBHOOK_SECRET;
   let payload;
   try {
     payload = JSON.parse(raw.toString("utf8"));
   } catch {
     res.status(400).json({ error: "invalid_json" });
+    return;
+  }
+  const writeKey = process.env.FUNGIES_WRITE_API_KEY;
+  const readKey = process.env.FUNGIES_READ_API_KEY;
+  const headerWrite = req.headers["x-write-api-key"];
+  const headerRead = req.headers["x-api-key"];
+  if (writeKey || readKey) {
+    const okHeader = (writeKey && headerWrite === writeKey) || (readKey && headerRead === readKey);
+    if (!okHeader) {
+      res.status(401).json({ error: "invalid_api_key" });
+      return;
+    }
+  }
+  const ok = verifyWithFallbacks(raw, secret, payload, signature);
+  if (!ok) {
+    res.status(401).json({ error: "invalid_signature" });
     return;
   }
   const evt = extractEventType(payload);

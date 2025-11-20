@@ -53,3 +53,9 @@ Product Filter
 - Set `FUNGIES_PRODUCT_ID` to the subscription product ID to act on.
 - Events are ignored unless the payload contains a matching product ID.
 - Supported extraction paths include `product_id`, `product.id`, and `subscription.product.id`.
+
+Fungies API Key Headers (Optional)
+- If Fungies includes API keys in webhook requests, set:
+- `FUNGIES_READ_API_KEY` and/or `FUNGIES_WRITE_API_KEY`.
+- For POST requests, the function accepts either `x-write-api-key` or `x-api-key` matching the configured values.
+- If neither is set in env, the check is skipped; HMAC signature verification still applies.
