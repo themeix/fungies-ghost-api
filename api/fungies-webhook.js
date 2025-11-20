@@ -121,6 +121,7 @@ export default async function handler(req, res) {
     return;
   }
   const evt = extractEventType(payload);
+  const evtName = typeof evt === "string" ? evt.toLowerCase() : "";
   const email = extractEmail(payload);
   if (!email) {
     res.status(400).json({ error: "missing_email" });
@@ -139,21 +140,31 @@ export default async function handler(req, res) {
     member = await createMember(base, token, { email, labels: [] });
   }
   const label = "active-subscriber";
-  const addEvents = ["subscription.created", "subscription.updated", "subscription.renewed"]; 
-  const removeEvents = ["subscription.cancelled", "payment.failed"]; 
-  if (addEvents.includes(evt)) {
+  const addEvents = [
+    "subscription.created",
+    "subscription.updated",
+    "subscription.renewed",
+    "subscription.interval",
+    "payment.success",
+  ];
+  const removeEvents = [
+    "subscription.cancelled",
+    "payment.failed",
+    "payment.refunded",
+  ];
+  if (addEvents.includes(evtName)) {
     const refreshed = await getMemberById(base, token, member.id);
     const labels = ensureLabelSet(refreshed?.labels || member.labels || [], label, true);
     await updateMember(base, token, { id: member.id, labels });
     res.status(200).json({ ok: true, event: evt, action: "label_added" });
     return;
   }
-  if (removeEvents.includes(evt)) {
+  if (removeEvents.includes(evtName)) {
     const refreshed = await getMemberById(base, token, member.id);
     const labels = ensureLabelSet(refreshed?.labels || member.labels || [], label, false);
     await updateMember(base, token, { id: member.id, labels });
     res.status(200).json({ ok: true, event: evt, action: "label_removed" });
     return;
   }
-  res.status(200).json({ ok: true, ignored: true, event: evt });
+  res.status(200).json({ ok: true, ignored: true, event: evtName || evt });
 }

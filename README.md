@@ -24,11 +24,14 @@ Setup
 - The webhook endpoint is `https://<your-vercel-deployment>/api/fungies-webhook`.
 
 Behavior
-- `subscription.created` → adds `active-subscriber` label
-- `subscription.updated` → ensures `active-subscriber` label exists
-- `subscription.renewed` → ensures `active-subscriber` label exists
-- `subscription.cancelled` → removes `active-subscriber` label
-- `payment.failed` → removes `active-subscriber` label
+- `subscription.created` → adds `active-subscriber`
+- `subscription.updated` → ensures `active-subscriber`
+- `subscription.renewed` → ensures `active-subscriber`
+- `subscription.interval` → ensures `active-subscriber`
+- `payment.success` → ensures `active-subscriber`
+- `subscription.cancelled` → removes `active-subscriber`
+- `payment.failed` → removes `active-subscriber`
+- `payment.refunded` → removes `active-subscriber`
 
 Notes
 - Uses Ghost Admin API JWT with HS256 and `kid` header.
