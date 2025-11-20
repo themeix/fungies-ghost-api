@@ -48,3 +48,8 @@ Vercel Environments
 - Vercel sets `VERCEL_ENV` to `development`, `preview`, or `production`.
 - Configure env vars in Vercel for each environment.
 - The function will read values from `process.env` without exposing secrets.
+
+Product Filter
+- Set `FUNGIES_PRODUCT_ID` to the subscription product ID to act on.
+- Events are ignored unless the payload contains a matching product ID.
+- Supported extraction paths include `product_id`, `product.id`, and `subscription.product.id`.

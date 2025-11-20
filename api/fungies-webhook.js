@@ -1,14 +1,38 @@
 import crypto from "crypto";
 import getRawBody from "raw-body";
 
+function candidatesFromSecret(secret) {
+  const s = String(secret || "").trim();
+  const arr = [];
+  const b64 = s.startsWith("sec_") ? s.slice(4) : s;
+  try { arr.push(Buffer.from(b64, "base64")); } catch {}
+  try { arr.push(Buffer.from(s, "hex")); } catch {}
+  arr.push(Buffer.from(s, "utf8"));
+  return arr.filter((b) => b && b.length > 0);
+}
+
+function bufferFromSignature(sig) {
+  const raw = String(sig || "").trim();
+  const cleaned = raw.replace(/^sha256=/, "");
+  const tryHex = /^[0-9a-fA-F]+$/.test(cleaned);
+  if (tryHex) {
+    try { return Buffer.from(cleaned, "hex"); } catch {}
+  }
+  const b64 = cleaned.replace(/-/g, "+").replace(/_/g, "/");
+  const pad = b64.length % 4 === 0 ? b64 : b64 + "=".repeat(4 - (b64.length % 4));
+  try { return Buffer.from(pad, "base64"); } catch {}
+  return null;
+}
+
 function verifySignature(raw, secret, signature) {
   if (!secret || !signature) return false;
-  const expected = crypto.createHmac("sha256", secret).update(raw).digest("hex");
-  const provided = String(signature).replace(/^sha256=/, "").trim();
-  const a = Buffer.from(expected, "hex");
-  const b = Buffer.from(provided, "hex");
-  if (a.length !== b.length) return false;
-  return crypto.timingSafeEqual(a, b);
+  const sigBuf = bufferFromSignature(signature);
+  if (!sigBuf) return false;
+  for (const keyBuf of candidatesFromSecret(secret)) {
+    const digestRaw = crypto.createHmac("sha256", keyBuf).update(raw).digest();
+    if (digestRaw.length === sigBuf.length && crypto.timingSafeEqual(digestRaw, sigBuf)) return true;
+  }
+  return false;
 }
 
 function base64urlEncode(obj) {
@@ -93,6 +117,12 @@ function extractEmail(payload) {
   );
 }
 
+function extractProductId(payload) {
+  return (
+    payload?.product_id || payload?.productId || payload?.product?.id || payload?.subscription?.product?.id || payload?.data?.product_id || payload?.data?.product?.id || (Array.isArray(payload?.line_items) && payload.line_items[0]?.product_id) || (Array.isArray(payload?.items) && payload.items[0]?.product?.id)
+  );
+}
+
 export default async function handler(req, res) {
   if (req.method === "GET") {
     const envName = process.env.VERCEL_ENV || process.env.NODE_ENV || "development";
@@ -122,6 +152,7 @@ export default async function handler(req, res) {
   }
   const evt = extractEventType(payload);
   const evtName = typeof evt === "string" ? evt.toLowerCase() : "";
+  const evtKey = evtName.replace(/_/g, ".");
   const email = extractEmail(payload);
   if (!email) {
     res.status(400).json({ error: "missing_email" });
@@ -135,6 +166,12 @@ export default async function handler(req, res) {
     return;
   }
   const base = `${siteUrl}/ghost/api/admin`;
+  const allowedProductId = process.env.FUNGIES_PRODUCT_ID || "83b916a0-77c8-49b8-82b0-fdec2f39da9a";
+  const productId = extractProductId(payload);
+  if (!productId || String(productId) !== String(allowedProductId)) {
+    res.status(200).json({ ok: true, ignored: true, reason: "product_mismatch", configured_product_id: Boolean(process.env.FUNGIES_PRODUCT_ID), event: evtKey || evt });
+    return;
+  }
   let member = await findMemberByEmail(base, token, email);
   if (!member) {
     member = await createMember(base, token, { email, labels: [] });
@@ -152,19 +189,19 @@ export default async function handler(req, res) {
     "payment.failed",
     "payment.refunded",
   ];
-  if (addEvents.includes(evtName)) {
+  if (addEvents.includes(evtKey)) {
     const refreshed = await getMemberById(base, token, member.id);
     const labels = ensureLabelSet(refreshed?.labels || member.labels || [], label, true);
     await updateMember(base, token, { id: member.id, labels });
     res.status(200).json({ ok: true, event: evt, action: "label_added" });
     return;
   }
-  if (removeEvents.includes(evtName)) {
+  if (removeEvents.includes(evtKey)) {
     const refreshed = await getMemberById(base, token, member.id);
     const labels = ensureLabelSet(refreshed?.labels || member.labels || [], label, false);
     await updateMember(base, token, { id: member.id, labels });
     res.status(200).json({ ok: true, event: evt, action: "label_removed" });
     return;
   }
-  res.status(200).json({ ok: true, ignored: true, event: evtName || evt });
+  res.status(200).json({ ok: true, ignored: true, event: evtKey || evt });
 }
