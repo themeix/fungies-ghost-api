@@ -152,26 +152,51 @@ export default async function handler(req, res) {
 
     const event = JSON.parse(rawBody);
 
+    console.log('Webhook event received:', event.type);
+
     // Handle successful payment
-    if (event.type === 'payment.succeeded') {
-      const { email, name } = event.data.metadata;
+    if (event.type === 'payment_success') {
+      // Get email from customer/user data
+      const email = event.data?.customer?.email || event.data?.user?.email;
       
-      if (!email || !name) {
-        console.error('Missing email or name in metadata');
-        return res.status(400).json({ error: 'Missing required metadata' });
+      // Try to get name from various possible locations
+      const name = event.data?.customer?.name || 
+                   event.data?.user?.name || 
+                   event.data?.customer?.username ||
+                   event.data?.user?.username ||
+                   email?.split('@')[0]; // Fallback to email username
+      
+      if (!email) {
+        console.error('Missing email in webhook data');
+        return res.status(400).json({ error: 'Missing email' });
       }
 
       // Create user in Ghost
-      const ghostMember = await createGhostMember(email, name);
-      
-      console.log('Ghost member created:', ghostMember.members[0].id);
-      
-      return res.status(200).json({ 
-        success: true, 
-        message: 'User created successfully',
-        memberId: ghostMember.members[0].id
-      });
+      try {
+        const ghostMember = await createGhostMember(email, name);
+        
+        console.log('Ghost member created:', ghostMember.members[0].id);
+        
+        return res.status(200).json({ 
+          success: true, 
+          message: 'User created successfully',
+          memberId: ghostMember.members[0].id,
+          email: email
+        });
+      } catch (error) {
+        // If member already exists, that's okay
+        if (error.response?.data?.errors?.[0]?.type === 'ValidationError') {
+          console.log('Member already exists:', email);
+          return res.status(200).json({ 
+            success: true, 
+            message: 'Member already exists',
+            email: email
+          });
+        }
+        throw error;
+      }
     } else {
+      console.log('Unhandled event type:', event.type);
       return res.status(200).json({ success: true, message: 'Event received' });
     }
   } catch (error) {
