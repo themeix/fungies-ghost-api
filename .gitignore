@@ -1,6 +1,8 @@
 Context.md
 .env*
-!.env.example
+.env.example
 /node_modules
 # Ignore files
 .DS_Store
+.vercel
+ 

@@ -55,7 +55,9 @@ Product Filter
 - Supported extraction paths include `product_id`, `product.id`, and `subscription.product.id`.
 
 Fungies API Key Headers (Optional)
-- If Fungies includes API keys in webhook requests, set:
-- `FUNGIES_READ_API_KEY` and/or `FUNGIES_WRITE_API_KEY`.
-- For POST requests, the function accepts either `x-write-api-key` or `x-api-key` matching the configured values.
-- If neither is set in env, the check is skipped; HMAC signature verification still applies.
+- Set `FUNGIES_PUBLIC_KEY` and `FUNGIES_SECRET_KEY` from Fungies Dashboard.
+- The webhook verifies:
+- `x-fngs-public-key` equals `FUNGIES_PUBLIC_KEY` (all requests)
+- `x-fngs-secret-key` equals `FUNGIES_SECRET_KEY` (POST requests)
+- If `x-fungies-signature` is present, HMAC verification against `FUNGIES_WEBHOOK_SECRET` also runs.
+- If signature header is absent, API key verification alone secures the request.
