@@ -1,249 +1,395 @@
-// api/create-payment.js
-const axios = require('axios');
+import crypto from "crypto";
+import getRawBody from "raw-body";
 
-const FUNGIES_PUBLIC_KEY = process.env.FUNGIES_PUBLIC_KEY || 'pub_kblEOEVp1m18vSSkr20FUer7vbrm88eQXtIrngC87wI=';
-const FUNGIES_SECRET_KEY = process.env.FUNGIES_SECRET_KEY || 'sec_pRg0uSwV4Ea5FVWwBUf7O9iPZQYLZoiF/RQbiynNA7A=';
- 
-
-export default async function handler(req, res) {
-  // Enable CORS
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
-  }
-
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method not allowed' });
-  }
-
-  try {
-    const { amount, email, name } = req.body;
-
-    if (!amount || !email || !name) {
-      return res.status(400).json({ error: 'Missing required fields' });
-    }
-
-    const response = await axios.post(
-      'https://api.fungies.io/v1/sessions',
-      {
-        amount: amount,
-        currency: 'USD',
-        successUrl: `${process.env.VERCEL_URL || req.headers.host}/payment-success`,
-        cancelUrl: `${process.env.VERCEL_URL || req.headers.host}/payment-cancel`,
-        metadata: {
-          email: email,
-          name: name
-        }
-      },
-      {
-        headers: {
-          'x-fngs-public-key': FUNGIES_PUBLIC_KEY,
-          'x-fngs-secret-key': FUNGIES_SECRET_KEY,
-          'Content-Type': 'application/json'
-        }
-      }
-    );
-
-    res.status(200).json({ 
-      sessionId: response.data.id,
-      checkoutUrl: response.data.url 
-    });
-  } catch (error) {
-    console.error('Fungies API Error:', error.response?.data || error.message);
-    res.status(500).json({ error: 'Failed to create payment session' });
-  }
+// Helper functions for signature verification
+function candidatesFromSecret(secret) {
+  const s = String(secret || "").trim();
+  const arr = [];
+  const b64 = s.startsWith("sec_") ? s.slice(4) : s;
+  try { arr.push(Buffer.from(b64, "base64")); } catch {}
+  try { arr.push(Buffer.from(s, "hex")); } catch {}
+  arr.push(Buffer.from(s, "utf8"));
+  return arr.filter((b) => b && b.length > 0);
 }
 
-// api/webhook.js
-const crypto = require('crypto');
-const axios = require('axios');
-const jwt = require('jsonwebtoken');
+function bufferFromSignature(sig) {
+  const raw = String(sig || "").trim();
+  const cleaned = raw.replace(/^sha256=/, "");
+  const tryHex = /^[0-9a-fA-F]+$/.test(cleaned);
+  if (tryHex) {
+    try { return Buffer.from(cleaned, "hex"); } catch {}
+  }
+  const b64 = cleaned.replace(/-/g, "+").replace(/_/g, "/");
+  const pad = b64.length % 4 === 0 ? b64 : b64 + "=".repeat(4 - (b64.length % 4));
+  try { return Buffer.from(pad, "base64"); } catch {}
+  return null;
+}
 
-const FUNGIES_SECRET_KEY = process.env.FUNGIES_SECRET_KEY || 'sec_pRg0uSwV4Ea5FVWwBUf7O9iPZQYLZoiF/RQbiynNA7A=';
-const FUNGIES_PUBLIC_KEY = process.env.FUNGIES_PUBLIC_KEY || 'pub_kblEOEVp1m18vSSkr20FUer7vbrm88eQXtIrngC87wI=';
-const GHOST_ADMIN_KEY = process.env.GHOST_ADMIN_KEY || '691f32998338c8000199ee57:e35d2e5924d76a802a03f14d4a9b179b90ab0e99769d9c3d395fa3e7ce70dff4';
-const GHOST_API_URL = process.env.GHOST_API_URL || 'https://diary-of-the-libertine-muse.ghost.io';
+function verifySignature(raw, secret, signature) {
+  if (!secret || !signature) return false;
+  const sigBuf = bufferFromSignature(signature);
+  if (!sigBuf) return false;
+  for (const keyBuf of candidatesFromSecret(secret)) {
+    const digestRaw = crypto.createHmac("sha256", keyBuf).update(raw).digest();
+    if (digestRaw.length === sigBuf.length && crypto.timingSafeEqual(digestRaw, sigBuf)) return true;
+  }
+  return false;
+}
 
-// Disable body parsing, need raw body for signature verification
+function getSignatureHeader(req) {
+  const h = req.headers || {};
+  return (
+    h["x-fungies-signature"] || 
+    h["x-fungies-signature-sha256"] || 
+    h["x-signature"] || 
+    h["x-webhook-signature"] || 
+    h["x-hub-signature"]
+  );
+}
+
+function stableStringify(obj) {
+  const sortObj = (o) => {
+    if (Array.isArray(o)) return o.map(sortObj);
+    if (o && typeof o === "object") {
+      const keys = Object.keys(o).sort();
+      const out = {};
+      for (const k of keys) out[k] = sortObj(o[k]);
+      return out;
+    }
+    return o;
+  };
+  return JSON.stringify(sortObj(obj));
+}
+
+function verifyWithFallbacks(raw, secret, payload, signature) {
+  if (verifySignature(raw, secret, signature)) return true;
+  let candidates = [];
+  try { candidates.push(Buffer.from(stableStringify(payload))); } catch {}
+  try { candidates.push(Buffer.from(JSON.stringify(payload))); } catch {}
+  const id = payload?.id;
+  const key = payload?.idempotencyKey;
+  const type = payload?.type;
+  for (const s of [id, key, type, key && id && `${id}.${key}`, key && type && `${type}.${key}`].filter(Boolean)) {
+    candidates.push(Buffer.from(String(s)));
+  }
+  for (const c of candidates) {
+    if (verifySignature(c, secret, signature)) return true;
+  }
+  return false;
+}
+
+// Ghost Admin API token generation
+function base64urlEncode(obj) {
+  const json = typeof obj === "string" ? obj : JSON.stringify(obj);
+  return Buffer.from(json)
+    .toString("base64")
+    .replace(/=+/g, "")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_");
+}
+
+function createGhostAdminToken(key) {
+  if (!key) throw new Error("Missing GHOST_ADMIN_API_KEY");
+  const [id, secretHex] = key.split(":");
+  const secret = Buffer.from(secretHex, "hex");
+  const header = { alg: "HS256", kid: id, typ: "JWT" };
+  const iat = Math.floor(Date.now() / 1000);
+  const payload = { iat, exp: iat + 300, aud: "/admin/" };
+  const encodedHeader = base64urlEncode(header);
+  const encodedPayload = base64urlEncode(payload);
+  const toSign = `${encodedHeader}.${encodedPayload}`;
+  const signature = crypto
+    .createHmac("sha256", secret)
+    .update(toSign)
+    .digest("base64")
+    .replace(/=+/g, "")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_");
+  return `${toSign}.${signature}`;
+}
+
+// Ghost API helper functions
+async function ghostFetch(url, token, init = {}) {
+  const res = await fetch(url, {
+    ...init,
+    headers: {
+      ...(init.headers || {}),
+      Authorization: `Ghost ${token}`,
+      "Content-Type": "application/json",
+    },
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Ghost API error ${res.status}: ${text}`);
+  }
+  return res.json();
+}
+
+async function findMemberByEmail(base, token, email) {
+  const url = `${base}/members/?filter=email:${encodeURIComponent(email)}&limit=1`;
+  const json = await ghostFetch(url, token);
+  return (json.members && json.members[0]) || null;
+}
+
+async function getMemberById(base, token, id) {
+  const url = `${base}/members/${encodeURIComponent(id)}/`;
+  const json = await ghostFetch(url, token);
+  return (json.members && json.members[0]) || null;
+}
+
+async function createMember(base, token, member) {
+  const body = { members: [member] };
+  const json = await ghostFetch(`${base}/members/`, token, { 
+    method: "POST", 
+    body: JSON.stringify(body) 
+  });
+  return (json.members && json.members[0]) || null;
+}
+
+async function updateMember(base, token, member) {
+  const body = { members: [member] };
+  const json = await ghostFetch(
+    `${base}/members/${encodeURIComponent(member.id)}/`, 
+    token, 
+    { method: "PUT", body: JSON.stringify(body) }
+  );
+  return (json.members && json.members[0]) || null;
+}
+
+function ensureLabelSet(labels, label, shouldHave) {
+  const names = (labels || []).map((l) => (typeof l === "string" ? l : l.name));
+  const has = names.includes(label);
+  if (shouldHave && !has) names.push(label);
+  if (!shouldHave && has) {
+    const i = names.indexOf(label);
+    names.splice(i, 1);
+  }
+  return names.map((n) => ({ name: n }));
+}
+
+// Extract data from webhook payload
+function extractEventType(payload) {
+  return (
+    payload?.type || 
+    payload?.event || 
+    payload?.action || 
+    payload?.event?.type || 
+    payload?.data?.type || 
+    payload?.data?.event
+  );
+}
+
+function extractEmail(payload) {
+  return (
+    payload?.email || 
+    payload?.customer_email || 
+    payload?.customer?.email || 
+    payload?.user?.email || 
+    payload?.data?.customer?.email || 
+    payload?.data?.user?.email ||
+    payload?.subscription?.customer?.email
+  );
+}
+
+function extractProductId(payload) {
+  return (
+    payload?.product_id || 
+    payload?.productId || 
+    payload?.product?.id || 
+    payload?.subscription?.product?.id || 
+    payload?.data?.product_id || 
+    payload?.data?.product?.id || 
+    (Array.isArray(payload?.items) && payload.items[0]?.product?.id) ||
+    (Array.isArray(payload?.line_items) && payload.line_items[0]?.product_id)
+  );
+}
+
+// Disable body parsing for signature verification
 export const config = {
   api: {
     bodyParser: false,
   },
 };
 
-// Helper to get raw body
-async function getRawBody(req) {
-  return new Promise((resolve, reject) => {
-    let data = '';
-    req.on('data', chunk => {
-      data += chunk;
-    });
-    req.on('end', () => {
-      resolve(data);
-    });
-    req.on('error', reject);
-  });
-}
-
-// Generate Ghost Admin API JWT token
-function generateGhostToken() {
-  const [id, secret] = GHOST_ADMIN_KEY.split(':');
-  const token = jwt.sign({}, Buffer.from(secret, 'hex'), {
-    keyid: id,
-    algorithm: 'HS256',
-    expiresIn: '5m',
-    audience: `/admin/`
-  });
-  return token;
-}
-
-// Create a member in Ghost
-async function createGhostMember(email, name) {
-  try {
-    const token = generateGhostToken();
-    const response = await axios.post(
-      `${GHOST_API_URL}/ghost/api/admin/members/`,
-      {
-        members: [{
-          email: email,
-          name: name,
-          note: 'Created via Fungies payment'
-        }]
-      },
-      {
-        headers: {
-          'Authorization': `Ghost ${token}`,
-          'Content-Type': 'application/json'
-        }
-      }
-    );
-    return response.data;
-  } catch (error) {
-    console.error('Ghost API Error:', error.response?.data || error.message);
-    throw error;
-  }
-}
-
-// Verify Fungies webhook signature
-function verifyFungiesSignature(rawBody, signature) {
-  const hmac = crypto.createHmac('sha256', FUNGIES_SECRET_KEY);
-  hmac.update(rawBody);
-  const calculatedSignature = hmac.digest('base64');
-  return calculatedSignature === signature;
-}
-
 export default async function handler(req, res) {
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method not allowed' });
-  }
-
-  try {
-    const rawBody = await getRawBody(req);
-    const signature = req.headers['x-fungies-signature'];
+  // Health check endpoint
+  if (req.method === "GET") {
+    const envName = process.env.VERCEL_ENV || process.env.NODE_ENV || "development";
+    const hasGhostUrl = Boolean(process.env.GHOST_SITE_URL || process.env.GHOST_ADMIN_API_URL);
+    const hasGhostKey = Boolean(process.env.GHOST_ADMIN_API_KEY);
+    const hasFungiesSecret = Boolean(process.env.FUNGIES_WEBHOOK_SECRET);
     
-    // Verify webhook signature
-    if (!verifyFungiesSignature(rawBody, signature)) {
-      console.error('Invalid signature');
-      return res.status(401).json({ error: 'Invalid signature' });
-    }
-
-    const event = JSON.parse(rawBody);
-
-    console.log('Webhook event received:', event.type);
-
-    // Handle successful payment
-    if (event.type === 'payment_success') {
-      // Get email from customer/user data
-      const email = event.data?.customer?.email || event.data?.user?.email;
-      
-      // Try to get name from various possible locations
-      const name = event.data?.customer?.name || 
-                   event.data?.user?.name || 
-                   event.data?.customer?.username ||
-                   event.data?.user?.username ||
-                   email?.split('@')[0]; // Fallback to email username
-      
-      if (!email) {
-        console.error('Missing email in webhook data');
-        return res.status(400).json({ error: 'Missing email' });
-      }
-
-      // Create user in Ghost
-      try {
-        const ghostMember = await createGhostMember(email, name);
-        
-        console.log('Ghost member created:', ghostMember.members[0].id);
-        
-        return res.status(200).json({ 
-          success: true, 
-          message: 'User created successfully',
-          memberId: ghostMember.members[0].id,
-          email: email
-        });
-      } catch (error) {
-        // If member already exists, that's okay
-        if (error.response?.data?.errors?.[0]?.type === 'ValidationError') {
-          console.log('Member already exists:', email);
-          return res.status(200).json({ 
-            success: true, 
-            message: 'Member already exists',
-            email: email
-          });
-        }
-        throw error;
-      }
-    } else {
-      console.log('Unhandled event type:', event.type);
-      return res.status(200).json({ success: true, message: 'Event received' });
-    }
-  } catch (error) {
-    console.error('Webhook Error:', error);
-    return res.status(500).json({ error: 'Webhook processing failed' });
-  }
-}
-
-// api/payment-status.js
-const axios = require('axios');
-
-const FUNGIES_SECRET_KEY = process.env.FUNGIES_SECRET_KEY || 'sec_pRg0uSwV4Ea5FVWwBUf7O9iPZQYLZoiF/RQbiynNA7A=';
-
-export default async function handler(req, res) {
-  // Enable CORS
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
+    res.status(200).json({ 
+      ok: true, 
+      env: envName, 
+      ghostUrl: hasGhostUrl, 
+      ghostKey: hasGhostKey, 
+      fungiesSecret: hasFungiesSecret
+    });
+    return;
   }
 
-  if (req.method !== 'GET') {
-    return res.status(405).json({ error: 'Method not allowed' });
+  if (req.method !== "POST") {
+    res.status(405).json({ error: "method_not_allowed" });
+    return;
+  }
+
+  // Get raw body for signature verification
+  const raw = await getRawBody(req);
+  const signature = getSignatureHeader(req);
+  const secret = process.env.FUNGIES_WEBHOOK_SECRET;
+
+  // Parse payload
+  let payload;
+  try {
+    payload = JSON.parse(raw.toString("utf8"));
+  } catch {
+    res.status(400).json({ error: "invalid_json" });
+    return;
+  }
+
+  // Verify signature if present
+  if (signature && secret) {
+    const ok = verifyWithFallbacks(raw, secret, payload, signature);
+    if (!ok) {
+      console.error("Invalid webhook signature");
+      res.status(401).json({ error: "invalid_signature" });
+      return;
+    }
+  }
+
+  // Extract event data
+  const evt = extractEventType(payload);
+  const evtName = typeof evt === "string" ? evt.toLowerCase() : "";
+  const evtKey = evtName.replace(/_/g, ".");
+  const email = extractEmail(payload);
+
+  if (!email) {
+    console.error("No email found in webhook payload");
+    res.status(400).json({ error: "missing_email" });
+    return;
+  }
+
+  // Setup Ghost API
+  const key = process.env.GHOST_ADMIN_API_KEY;
+  if (!key) {
+    res.status(500).json({ error: "missing_ghost_admin_key" });
+    return;
+  }
+
+  const token = createGhostAdminToken(key);
+  const siteUrl = (process.env.GHOST_ADMIN_API_URL || process.env.GHOST_SITE_URL || "").replace(/\/$/, "");
+  
+  if (!siteUrl) {
+    res.status(500).json({ error: "missing_ghost_url" });
+    return;
+  }
+
+  const base = `${siteUrl}/ghost/api/admin`;
+
+  // Optional: Filter by product ID
+  const allowedProductId = process.env.FUNGIES_PRODUCT_ID;
+  if (allowedProductId) {
+    const productId = extractProductId(payload);
+    if (!productId || String(productId) !== String(allowedProductId)) {
+      console.log(`Product ID mismatch: ${productId} !== ${allowedProductId}`);
+      res.status(200).json({ 
+        ok: true, 
+        ignored: true, 
+        reason: "product_mismatch", 
+        event: evtKey || evt 
+      });
+      return;
+    }
   }
 
   try {
-    const { sessionId } = req.query;
-
-    if (!sessionId) {
-      return res.status(400).json({ error: 'Session ID required' });
+    // Find or create member
+    let member = await findMemberByEmail(base, token, email);
+    if (!member) {
+      console.log(`Creating new member: ${email}`);
+      member = await createMember(base, token, { 
+        email, 
+        labels: [],
+        name: payload?.data?.customer?.username || email.split('@')[0]
+      });
     }
 
-    const response = await axios.get(
-      `https://api.fungies.io/v1/sessions/${sessionId}`,
-      {
-        headers: {
-          'x-fngs-public-key': FUNGIES_PUBLIC_KEY,
-          'x-fngs-secret-key': FUNGIES_SECRET_KEY
-        }
-      }
-    );
+    // Label to add/remove
+    const label = "active-subscriber";
 
-    res.status(200).json(response.data);
+    // Events that should add the label
+    const addEvents = [
+      "subscription.created",
+      "subscription.updated",
+      "subscription.renewed",
+      "subscription.interval",
+      "payment.success",
+      "payment_success", // Fungies format
+    ];
+
+    // Events that should remove the label
+    const removeEvents = [
+      "subscription.cancelled",
+      "subscription.canceled",
+      "payment.failed",
+      "payment.refunded",
+      "payment_failed",
+      "payment_refunded",
+    ];
+
+    if (addEvents.includes(evtKey) || addEvents.includes(evtName)) {
+      const refreshed = await getMemberById(base, token, member.id);
+      const labels = ensureLabelSet(
+        refreshed?.labels || member.labels || [], 
+        label, 
+        true
+      );
+      await updateMember(base, token, { id: member.id, labels });
+      
+      console.log(`Added label "${label}" to member: ${email}`);
+      res.status(200).json({ 
+        ok: true, 
+        event: evt, 
+        action: "label_added",
+        email: email 
+      });
+      return;
+    }
+
+    if (removeEvents.includes(evtKey) || removeEvents.includes(evtName)) {
+      const refreshed = await getMemberById(base, token, member.id);
+      const labels = ensureLabelSet(
+        refreshed?.labels || member.labels || [], 
+        label, 
+        false
+      );
+      await updateMember(base, token, { id: member.id, labels });
+      
+      console.log(`Removed label "${label}" from member: ${email}`);
+      res.status(200).json({ 
+        ok: true, 
+        event: evt, 
+        action: "label_removed",
+        email: email 
+      });
+      return;
+    }
+
+    // Event received but no action taken
+    console.log(`Event received but not handled: ${evtKey || evt}`);
+    res.status(200).json({ 
+      ok: true, 
+      ignored: true, 
+      event: evtKey || evt,
+      email: email 
+    });
+
   } catch (error) {
-    console.error('Error checking payment:', error.response?.data || error.message);
-    res.status(500).json({ error: 'Failed to check payment status' });
+    console.error("Webhook processing error:", error.message);
+    res.status(500).json({ 
+      error: "processing_failed", 
+      message: error.message 
+    });
   }
 }
