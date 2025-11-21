@@ -287,21 +287,36 @@ export default async function handler(req, res) {
 
   const base = `${siteUrl}/ghost/api/admin`;
 
-  // Optional: Filter by product ID
-  const allowedProductId = process.env.FUNGIES_PRODUCT_ID;
-  if (allowedProductId) {
-    const productId = extractProductId(payload);
-    if (!productId || String(productId) !== String(allowedProductId)) {
-      console.log(`Product ID mismatch: ${productId} !== ${allowedProductId}`);
-      res.status(200).json({ 
-        ok: true, 
-        ignored: true, 
-        reason: "product_mismatch", 
-        event: evtKey || evt 
-      });
-      return;
-    }
+ 
+// Optional: Filter by product ID
+const allowedProductId = (process.env.FUNGIES_PRODUCT_ID || "").trim();
+
+if (allowedProductId) {
+  const productId = (extractProductId(payload) || "").trim();
+
+  if (!productId) {
+    console.log("No product found in webhook payload");
+    return res.status(200).json({
+      ok: true,
+      ignored: true,
+      reason: "no_product_in_payload",
+      event: evtKey || evt
+    });
   }
+
+  if (productId !== allowedProductId) {
+    console.log(`Product ID mismatch: ${productId} !== ${allowedProductId}`);
+    return res.status(200).json({
+      ok: true,
+      ignored: true,
+      reason: "product_mismatch",
+      expected: allowedProductId,
+      received: productId,
+      event: evtKey || evt
+    });
+  }
+}
+
 
   try {
     // Find or create member
