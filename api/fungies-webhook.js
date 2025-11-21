@@ -199,8 +199,9 @@ function extractProductId(payload) {
     payload?.subscription?.product?.id || 
     payload?.data?.product_id || 
     payload?.data?.product?.id || 
-    (Array.isArray(payload?.items) && payload.items[0]?.product?.id) ||
-    (Array.isArray(payload?.line_items) && payload.line_items[0]?.product_id)
+    (Array.isArray(payload?.items) && (payload.items.find((i) => i?.product?.id)?.product?.id)) ||
+    (Array.isArray(payload?.data?.items) && (payload.data.items.find((i) => i?.product?.id)?.product?.id)) ||
+    (Array.isArray(payload?.line_items) && (payload.line_items.find((i) => i?.product_id)?.product_id))
   );
 }
 
