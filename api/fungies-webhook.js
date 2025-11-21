@@ -3,7 +3,7 @@ const axios = require('axios');
 
 const FUNGIES_PUBLIC_KEY = process.env.FUNGIES_PUBLIC_KEY || 'pub_kblEOEVp1m18vSSkr20FUer7vbrm88eQXtIrngC87wI=';
 const FUNGIES_SECRET_KEY = process.env.FUNGIES_SECRET_KEY || 'sec_pRg0uSwV4Ea5FVWwBUf7O9iPZQYLZoiF/RQbiynNA7A=';
-const FUNGIES_PUBLIC_KEY = process.env.FUNGIES_PUBLIC_KEY || 'pub_kblEOEVp1m18vSSkr20FUer7vbrm88eQXtIrngC87wI=';
+ 
 
 export default async function handler(req, res) {
   // Enable CORS
