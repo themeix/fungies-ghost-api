@@ -205,6 +205,30 @@ function extractProductId(payload) {
   );
 }
 
+function extractSubscriptionProductId(payload) {
+  const isSub = (t) => typeof t === "string" && t.toLowerCase() === "subscription";
+  if (payload?.product?.id && isSub(payload?.product?.type)) return payload.product.id;
+  if (payload?.data?.product?.id && isSub(payload?.data?.product?.type)) return payload.data.product.id;
+  const arrs = [payload?.items, payload?.data?.items];
+  for (const arr of arrs) {
+    if (Array.isArray(arr)) {
+      for (const i of arr) {
+        if (i?.product?.id && isSub(i?.product?.type)) return i.product.id;
+      }
+    }
+  }
+  return null;
+}
+
+function extractCountryCode(payload) {
+  return (
+    payload?.data?.user?.details?.countryCode ||
+    payload?.data?.customer?.details?.countryCode ||
+    payload?.customer?.details?.countryCode ||
+    payload?.user?.details?.countryCode
+  );
+}
+
 // Disable body parsing for signature verification
 export const config = {
   api: {
@@ -264,6 +288,8 @@ export default async function handler(req, res) {
   const evtName = typeof evt === "string" ? evt.toLowerCase() : "";
   const evtKey = evtName.replace(/_/g, ".");
   const email = extractEmail(payload);
+  const countryCodeRaw = extractCountryCode(payload);
+  const countryCode = countryCodeRaw ? String(countryCodeRaw).toUpperCase() : null;
 
   if (!email) {
     console.error("No email found in webhook payload");
@@ -292,30 +318,19 @@ export default async function handler(req, res) {
 // Optional: Filter by product ID
 const allowedProductId = (process.env.FUNGIES_PRODUCT_ID || "").trim();
 
-if (allowedProductId) {
-  const productId = (extractProductId(payload) || "").trim();
-
-  if (!productId) {
-    console.log("No product found in webhook payload");
-    return res.status(200).json({
-      ok: true,
-      ignored: true,
-      reason: "no_product_in_payload",
-      event: evtKey || evt
-    });
-  }
-
-  if (productId !== allowedProductId) {
-    console.log(`Product ID mismatch: ${productId} !== ${allowedProductId}`);
-    return res.status(200).json({
-      ok: true,
-      ignored: true,
-      reason: "product_mismatch",
-      expected: allowedProductId,
-      received: productId,
-      event: evtKey || evt
-    });
-  }
+const subProductId = (extractSubscriptionProductId(payload) || "").trim();
+if (!subProductId) {
+  return res.status(200).json({ ok: true, ignored: true, reason: "non_subscription_product", event: evtKey || evt });
+}
+if (allowedProductId && subProductId !== allowedProductId) {
+  return res.status(200).json({
+    ok: true,
+    ignored: true,
+    reason: "product_mismatch",
+    expected: allowedProductId,
+    received: subProductId,
+    event: evtKey || evt
+  });
 }
 
 
@@ -327,7 +342,8 @@ if (allowedProductId) {
       member = await createMember(base, token, { 
         email, 
         labels: [],
-        name: payload?.data?.customer?.username || email.split('@')[0]
+        name: payload?.data?.customer?.username || email.split('@')[0],
+        note: countryCode ? `country:${countryCode}` : undefined
       });
     }
 
@@ -361,7 +377,8 @@ if (allowedProductId) {
         label, 
         true
       );
-      await updateMember(base, token, { id: member.id, labels });
+      const nextNote = countryCode ? `country:${countryCode}` : (refreshed?.note || member.note);
+      await updateMember(base, token, { id: member.id, labels, note: nextNote });
       
       console.log(`Added label "${label}" to member: ${email}`);
       res.status(200).json({ 
@@ -380,7 +397,8 @@ if (allowedProductId) {
         label, 
         false
       );
-      await updateMember(base, token, { id: member.id, labels });
+      const nextNote = countryCode ? `country:${countryCode}` : (refreshed?.note || member.note);
+      await updateMember(base, token, { id: member.id, labels, note: nextNote });
       
       console.log(`Removed label "${label}" from member: ${email}`);
       res.status(200).json({ 
